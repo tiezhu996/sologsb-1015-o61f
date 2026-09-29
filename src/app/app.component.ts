@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, HostListener, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, HostListener, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
@@ -13,7 +13,8 @@ import { NzSwitchModule } from 'ng-zorro-antd/switch';
 import { NzTabsModule } from 'ng-zorro-antd/tabs';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
-import { METER_TEMPLATES, PoetryStoreService } from './services/poetry-store.service';
+import { formatContext, segmentKindLabel, METER_TEMPLATES, PoetryStoreService } from './services/poetry-store.service';
+import type { DiffSegment, DiffSegmentKind } from './models/poem.models';
 
 @Component({
   selector: 'app-root',
@@ -41,6 +42,33 @@ export class AppComponent {
   readonly store = inject(PoetryStoreService);
   readonly templates = METER_TEMPLATES;
   readonly selectedCell = computed(() => this.store.selectedCell());
+  readonly activeTab = signal(0);
+
+  /** 各类型异文段计数（供工具栏标签） */
+  readonly segmentCounts = computed(() => {
+    const segments = this.store.diffSegments();
+    return {
+      replace: segments.filter((segment) => segment.kind === 'replace' || segment.kind === 'mixed').length,
+      insert: segments.filter((segment) => segment.kind === 'insert').length,
+      delete: segments.filter((segment) => segment.kind === 'delete').length,
+    };
+  });
+
+  kindLabel(kind: DiffSegmentKind): string {
+    return segmentKindLabel(kind);
+  }
+
+  displayContext(text: string): string {
+    return formatContext(text);
+  }
+
+  /** 从异文段跳转到逐字标注页并定位到该段在当前稿中的字位 */
+  locateSegment(segment: DiffSegment): void {
+    this.activeTab.set(0);
+    if (segment.locateLine !== null) {
+      this.store.selectCell(segment.locateLine, segment.locatePosition ?? 0);
+    }
+  }
 
   get totalErrors(): number {
     return this.store.issues().filter((issue) => issue.level === 'error').length;
@@ -126,6 +154,12 @@ export class AppComponent {
       this.store.togglePause();
     } else if (event.key.toLowerCase() === 'r') {
       this.store.cycleRhyme();
+    } else if (event.key === ']') {
+      event.preventDefault();
+      this.store.nextDifference();
+    } else if (event.key === '[') {
+      event.preventDefault();
+      this.store.previousDifference();
     }
   }
 }

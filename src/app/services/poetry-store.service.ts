@@ -4,7 +4,10 @@ import type {
   AnalysisCell,
   AnalysisLine,
   CharacterMark,
-  CharDiff,
+  CompareBlock,
+  DiffSegment,
+  DiffSegmentKind,
+  DiffToken,
   MarkTone,
   MeterTemplate,
   PoemIssue,
@@ -53,6 +56,7 @@ export const METER_TEMPLATES: MeterTemplate[] = [
 ];
 
 const STORAGE_KEY = 'sologsb-1015-poetry-workspace-v1';
+const SCHEMA_VERSION = 2;
 const PUNCTUATION = new Set(['，', '。', '！', '？', '；', '：', '、', ' ', '\t']);
 const TONE_DICTIONARY: Record<string, Tone> = {
   春: '平', 眠: '平', 不: '仄', 觉: '仄', 晓: '仄', 处: '仄', 闻: '平', 啼: '平', 鸟: '仄',
@@ -72,6 +76,249 @@ function defaultMark(): CharacterMark {
   return { tone: '?', rhyme: '', pauseAfter: false, basis: '', note: '' };
 }
 
+/** 字符流单元：换行符与标点的 position 为 null，不计入逐字标注坐标 */
+export interface StreamToken {
+  ch: string;
+  line: number;
+  position: number | null;
+}
+
+export function buildStream(text: string): StreamToken[] {
+  const tokens: StreamToken[] = [];
+  let line = 0;
+  let position = 0;
+  for (const ch of Array.from(text)) {
+    if (ch === '\n') {
+      tokens.push({ ch, line, position: null });
+      line += 1;
+      position = 0;
+    } else if (PUNCTUATION.has(ch)) {
+      tokens.push({ ch, line, position: null });
+    } else {
+      tokens.push({ ch, line, position });
+      position += 1;
+    }
+  }
+  return tokens;
+}
+
+/** 以字符为单位做 LCS 对齐：相同字锚定，增、删各自成行，增删字不再连带整段错位 */
+export function alignStreams(oldTokens: StreamToken[], newTokens: StreamToken[]): DiffToken[] {
+  const n = oldTokens.length;
+  const m = newTokens.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      dp[i][j] = oldTokens[i].ch === newTokens[j].ch
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const result: DiffToken[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (oldTokens[i].ch === newTokens[j].ch) {
+      const o = oldTokens[i];
+      const w = newTokens[j];
+      result.push({
+        type: 'equal',
+        oldChar: o.ch,
+        newChar: w.ch,
+        oldLine: o.line,
+        oldPosition: o.position,
+        newLine: w.line,
+        newPosition: w.position,
+      });
+      i += 1;
+      j += 1;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      const o = oldTokens[i];
+      result.push({ type: 'delete', oldChar: o.ch, newChar: '', oldLine: o.line, oldPosition: o.position, newLine: null, newPosition: null });
+      i += 1;
+    } else {
+      const w = newTokens[j];
+      result.push({ type: 'insert', oldChar: '', newChar: w.ch, oldLine: null, oldPosition: null, newLine: w.line, newPosition: w.position });
+      j += 1;
+    }
+  }
+  while (i < n) {
+    const o = oldTokens[i];
+    result.push({ type: 'delete', oldChar: o.ch, newChar: '', oldLine: o.line, oldPosition: o.position, newLine: null, newPosition: null });
+    i += 1;
+  }
+  while (j < m) {
+    const w = newTokens[j];
+    result.push({ type: 'insert', oldChar: '', newChar: w.ch, oldLine: null, oldPosition: null, newLine: w.line, newPosition: w.position });
+    j += 1;
+  }
+  return result;
+}
+
+/**
+ * 文本增删后，把逐字标注（平仄、韵组、依据、批注）按相同字迁移到新文本，
+ * 对仗关系按行映射迁移；被整段删除的行，其标注与关系不再保留，避免无依据串位。
+ */
+export function migrateAnnotations(
+  oldText: string,
+  newText: string,
+  oldMarks: Record<string, CharacterMark>,
+  oldPairs: AntithesisPair[],
+): { marks: Record<string, CharacterMark>; pairs: AntithesisPair[] } {
+  const alignment = alignStreams(buildStream(oldText), buildStream(newText));
+  const newMarks: Record<string, CharacterMark> = {};
+  const oldLineToNew = new Map<number, number>();
+  for (const token of alignment) {
+    if (token.type !== 'equal') continue;
+    if (token.oldPosition !== null && token.newPosition !== null) {
+      const mark = oldMarks[key(token.oldLine as number, token.oldPosition)];
+      if (mark) newMarks[key(token.newLine as number, token.newPosition)] = clone(mark);
+    }
+    if (token.oldLine !== null && token.newLine !== null && !oldLineToNew.has(token.oldLine)) {
+      oldLineToNew.set(token.oldLine, token.newLine);
+    }
+  }
+  const pairs: AntithesisPair[] = [];
+  const seen = new Set<string>();
+  for (const pair of oldPairs) {
+    const leftLine = oldLineToNew.get(pair.leftLine);
+    const rightLine = oldLineToNew.get(pair.rightLine);
+    if (leftLine === undefined || rightLine === undefined || leftLine === rightLine) continue;
+    const a = Math.min(leftLine, rightLine);
+    const b = Math.max(leftLine, rightLine);
+    const signature = `${a}:${b}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    pairs.push({ ...clone(pair), leftLine: a, rightLine: b });
+  }
+  return { marks: newMarks, pairs };
+}
+
+function collectNotes(
+  run: DiffToken[],
+  leftVersion: PoemVersion | undefined,
+  rightVersion: PoemVersion | undefined,
+): DiffSegment['notes'] {
+  const notes: DiffSegment['notes'] = [];
+  const push = (
+    side: 'left' | 'right',
+    version: PoemVersion | undefined,
+    line: number | null,
+    position: number | null,
+    char: string,
+  ): void => {
+    if (!version || line === null || position === null) return;
+    const mark = version.marks[key(line, position)];
+    if (!mark) return;
+    const text = [mark.note, mark.basis].filter((value) => value.trim()).join('；');
+    if (!text) return;
+    notes.push({ side, versionName: version.name, char, text });
+  };
+  for (const token of run) {
+    if (token.type === 'delete') push('left', leftVersion, token.oldLine, token.oldPosition, token.oldChar);
+    if (token.type === 'insert') push('right', rightVersion, token.newLine, token.newPosition, token.newChar);
+  }
+  return notes;
+}
+
+/** 把连续的增删 token 合并成异文段，段内附两边用字、上下文与批注 */
+export function buildSegments(
+  tokens: DiffToken[],
+  leftVersion: PoemVersion | undefined,
+  rightVersion: PoemVersion | undefined,
+): DiffSegment[] {
+  const segments: DiffSegment[] = [];
+  let id = 0;
+  let i = 0;
+  while (i < tokens.length) {
+    if (tokens[i].type === 'equal') {
+      i += 1;
+      continue;
+    }
+    const start = i;
+    while (i < tokens.length && tokens[i].type !== 'equal') i += 1;
+    const run = tokens.slice(start, i);
+    const deletes = run.filter((token) => token.type === 'delete');
+    const inserts = run.filter((token) => token.type === 'insert');
+    const hasDelete = deletes.length > 0;
+    const hasInsert = inserts.length > 0;
+    const kind: DiffSegmentKind = hasDelete && hasInsert
+      ? (deletes.length === inserts.length ? 'replace' : 'mixed')
+      : hasDelete ? 'delete' : 'insert';
+    const contextBefore = tokens
+      .slice(Math.max(0, start - 2), start)
+      .filter((token) => token.type === 'equal')
+      .map((token) => token.oldChar)
+      .join('');
+    const contextAfter = tokens
+      .slice(i, Math.min(tokens.length, i + 2))
+      .filter((token) => token.type === 'equal')
+      .map((token) => token.oldChar)
+      .join('');
+    let locateLine: number | null = null;
+    let locatePosition: number | null = null;
+    const firstInsert = inserts[0];
+    if (firstInsert) {
+      locateLine = firstInsert.newLine;
+      locatePosition = firstInsert.newPosition;
+    } else {
+      const after = tokens[i];
+      const before = tokens[start - 1];
+      const anchor = after?.type === 'equal' ? after : before?.type === 'equal' ? before : null;
+      if (anchor) {
+        locateLine = anchor.newLine;
+        locatePosition = anchor.newPosition;
+      }
+    }
+    segments.push({
+      id: id++,
+      kind,
+      left: deletes.map((token) => token.oldChar).join(''),
+      right: inserts.map((token) => token.newChar).join(''),
+      contextBefore,
+      contextAfter,
+      notes: collectNotes(run, leftVersion, rightVersion),
+      locateLine,
+      locatePosition,
+    });
+  }
+  return segments;
+}
+
+function buildCompareBlocks(tokens: DiffToken[], segments: DiffSegment[]): CompareBlock[] {
+  const blocks: CompareBlock[] = [];
+  let i = 0;
+  let segmentIndex = 0;
+  while (i < tokens.length) {
+    if (tokens[i].type === 'equal') {
+      let text = '';
+      while (i < tokens.length && tokens[i].type === 'equal') {
+        text += tokens[i].oldChar;
+        i += 1;
+      }
+      blocks.push({ type: 'equal', text });
+    } else {
+      blocks.push({ type: 'segment', segment: segments[segmentIndex], segmentIndex });
+      while (i < tokens.length && tokens[i].type !== 'equal') i += 1;
+      segmentIndex += 1;
+    }
+  }
+  return blocks;
+}
+
+export function segmentKindLabel(kind: DiffSegmentKind): string {
+  switch (kind) {
+    case 'replace': return '换字';
+    case 'delete': return '缺字';
+    case 'insert': return '增字';
+    case 'mixed': return '混排';
+  }
+}
+
+export function formatContext(text: string): string {
+  return text.replace(/\n/g, '／');
+}
+
 function initialWorkspace(): PoemWorkspace {
   const now = new Date().toISOString();
   const spring = '春眠不觉晓，\n处处闻啼鸟。\n夜来风雨声，\n花落知多少。';
@@ -86,13 +333,12 @@ function initialWorkspace(): PoemWorkspace {
   marks[key(1, 2)] = { tone: '平', rhyme: '', pauseAfter: false, basis: '平水韵', note: '' };
   marks[key(2, 2)] = { tone: '平', rhyme: '', pauseAfter: false, basis: '平水韵', note: '' };
 
-  const variants = spring.replace('处处闻啼鸟', '处处闻啼鸟');
   const topVersion: PoemVersion = {
     id: 'version-main',
     name: '通行本 · 孟浩然集',
     source: '《孟浩然诗集笺注》',
     createdAt: now,
-    text: variants,
+    text: spring,
     marks,
     antithesisPairs: [],
   };
@@ -106,12 +352,89 @@ function initialWorkspace(): PoemWorkspace {
     antithesisPairs: [],
   };
   return {
+    schemaVersion: SCHEMA_VERSION,
     title: '春晓',
     author: '孟浩然',
     templateId: 'wuyan-zeqi',
+    baselineVersionId: '',
     versions: [topVersion, variant],
     activeVersionId: topVersion.id,
     updatedAt: now,
+  };
+}
+
+function normalizeMark(value: Record<string, unknown>): CharacterMark {
+  const tone = value['tone'] === '平' || value['tone'] === '仄' || value['tone'] === '中' || value['tone'] === '?'
+    ? value['tone'] as CharacterMark['tone']
+    : '?';
+  return {
+    tone,
+    rhyme: typeof value['rhyme'] === 'string' ? value['rhyme'] : '',
+    pauseAfter: value['pauseAfter'] === true,
+    basis: typeof value['basis'] === 'string' ? value['basis'] : '',
+    note: typeof value['note'] === 'string' ? value['note'] : '',
+  };
+}
+
+function migrateVersion(raw: unknown, index: number): PoemVersion {
+  const data = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const marks: Record<string, CharacterMark> = {};
+  if (data['marks'] && typeof data['marks'] === 'object') {
+    for (const [markKey, value] of Object.entries(data['marks'] as Record<string, unknown>)) {
+      if (value && typeof value === 'object') marks[markKey] = normalizeMark(value as Record<string, unknown>);
+    }
+  }
+  const antithesisPairs: AntithesisPair[] = [];
+  if (Array.isArray(data['antithesisPairs'])) {
+    for (const value of data['antithesisPairs'] as unknown[]) {
+      if (value && typeof value === 'object') {
+        const pair = value as Record<string, unknown>;
+        if (typeof pair['leftLine'] === 'number' && typeof pair['rightLine'] === 'number') {
+          antithesisPairs.push({
+            id: typeof pair['id'] === 'string' ? pair['id'] as string : uid('pair'),
+            leftLine: pair['leftLine'] as number,
+            rightLine: pair['rightLine'] as number,
+            note: typeof pair['note'] === 'string' ? pair['note'] : '',
+          });
+        }
+      }
+    }
+  }
+  return {
+    id: typeof data['id'] === 'string' ? data['id'] as string : uid('version'),
+    name: typeof data['name'] === 'string' ? data['name'] as string : `版本 ${index + 1}`,
+    source: typeof data['source'] === 'string' ? data['source'] as string : '',
+    createdAt: typeof data['createdAt'] === 'string' ? data['createdAt'] as string : new Date().toISOString(),
+    text: typeof data['text'] === 'string' ? data['text'] as string : '',
+    marks,
+    antithesisPairs,
+  };
+}
+
+/** 旧版本记录升级：v1 记录补全字段并规范化标注与关系，升级后回写本地存储 */
+export function migrateWorkspace(raw: unknown): PoemWorkspace {
+  if (typeof raw !== 'object' || raw === null) return initialWorkspace();
+  const data = raw as Record<string, unknown>;
+  const versionsRaw = Array.isArray(data['versions']) ? data['versions'] as unknown[] : [];
+  const versions = versionsRaw.map((version, index) => migrateVersion(version, index));
+  if (!versions.length) return initialWorkspace();
+  const activeVersionId = typeof data['activeVersionId'] === 'string'
+    && versions.some((version) => version.id === data['activeVersionId'])
+    ? data['activeVersionId'] as string
+    : versions[0].id;
+  const baselineVersionId = typeof data['baselineVersionId'] === 'string'
+    && versions.some((version) => version.id === data['baselineVersionId'])
+    ? data['baselineVersionId'] as string
+    : '';
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    title: typeof data['title'] === 'string' && data['title'] ? data['title'] as string : '未命名',
+    author: typeof data['author'] === 'string' ? data['author'] as string : '',
+    templateId: typeof data['templateId'] === 'string' ? data['templateId'] as string : 'wuyan-zeqi',
+    baselineVersionId,
+    versions,
+    activeVersionId,
+    updatedAt: typeof data['updatedAt'] === 'string' ? data['updatedAt'] as string : new Date().toISOString(),
   };
 }
 
@@ -119,8 +442,17 @@ function loadWorkspace(): PoemWorkspace {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return initialWorkspace();
-    const parsed = JSON.parse(raw) as PoemWorkspace;
-    return parsed.versions?.length ? parsed : initialWorkspace();
+    const parsed: unknown = JSON.parse(raw);
+    const workspace = migrateWorkspace(parsed);
+    const rawVersion = (parsed as { schemaVersion?: number } | null)?.schemaVersion ?? 0;
+    if (rawVersion < SCHEMA_VERSION) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
+      } catch {
+        /* 本地存储不可写时仅保留内存中的升级结果 */
+      }
+    }
+    return workspace;
   } catch {
     return initialWorkspace();
   }
@@ -131,7 +463,7 @@ export class PoetryStoreService {
   readonly workspace = signal<PoemWorkspace>(loadWorkspace());
   readonly selectedLine = signal(0);
   readonly selectedPosition = signal(4);
-  readonly baselineVersionId = signal<string>('');
+  readonly baselineVersionId = signal<string>(this.workspace().baselineVersionId);
   readonly currentDiffIndex = signal(0);
   readonly toast = signal('');
   readonly undoCount = signal(0);
@@ -235,22 +567,32 @@ export class PoetryStoreService {
     return issues;
   });
 
-  readonly diff = computed<CharDiff[]>(() => {
-    const left = this.workspace().versions.find((version) => version.id === this.baselineVersionId());
+  /** 底本与当前稿的字符级对齐结果（LCS，增删不错位） */
+  readonly diffTokens = computed<DiffToken[]>(() => {
+    const workspace = this.workspace();
+    const left = workspace.versions.find((version) => version.id === this.baselineVersionId());
     const right = this.activeVersion();
     if (!left || left.id === right.id) return [];
-    const leftChars = Array.from(left.text.replace(/\n/g, ''));
-    const rightChars = Array.from(right.text.replace(/\n/g, ''));
-    const size = Math.max(leftChars.length, rightChars.length);
-    return Array.from({ length: size }, (_, index) => ({
-      index,
-      left: leftChars[index] ?? '',
-      right: rightChars[index] ?? '',
-      changed: leftChars[index] !== rightChars[index],
-    }));
+    return alignStreams(buildStream(left.text), buildStream(right.text));
   });
 
-  readonly differences = computed(() => this.diff().filter((item) => item.changed).map((item) => item.index));
+  /** 连续变化字合并成的异文段 */
+  readonly diffSegments = computed<DiffSegment[]>(() => {
+    const tokens = this.diffTokens();
+    if (!tokens.length) return [];
+    const workspace = this.workspace();
+    const left = workspace.versions.find((version) => version.id === this.baselineVersionId());
+    return buildSegments(tokens, left, this.activeVersion());
+  });
+
+  /** 比较流渲染块：相同字串与异文段交错 */
+  readonly compareBlocks = computed<CompareBlock[]>(() => {
+    return buildCompareBlocks(this.diffTokens(), this.diffSegments());
+  });
+
+  /** 异文段总数（供界面计数） */
+  readonly differences = computed(() => this.diffSegments());
+
   readonly baselineVersion = computed(() => this.workspace().versions.find((version) => version.id === this.baselineVersionId()));
 
   selectVersion(id: string): void {
@@ -271,8 +613,13 @@ export class PoetryStoreService {
   updateText(text: string): void {
     this.commit((workspace) => {
       const version = this.versionIn(workspace);
+      const oldText = version.text;
       version.text = text;
+      const migrated = migrateAnnotations(oldText, text, version.marks, version.antithesisPairs);
+      version.marks = migrated.marks;
+      version.antithesisPairs = migrated.pairs;
     });
+    this.clampSelection();
   }
 
   updateTitle(title: string): void {
@@ -349,23 +696,33 @@ export class PoetryStoreService {
     this.toast.set('已建立独立校勘稿');
   }
 
+  setBaseline(id: string): void {
+    this.baselineVersionId.set(id);
+    this.workspace.update((workspace) => ({ ...workspace, baselineVersionId: id }));
+    this.persist();
+    this.currentDiffIndex.set(0);
+  }
+
   duplicateActiveAsBaseline(): void {
-    this.baselineVersionId.set(this.activeVersion().id);
+    this.setBaseline(this.activeVersion().id);
+  }
+
+  selectSegment(index: number): void {
+    const count = this.diffSegments().length;
+    if (!count) return;
+    this.currentDiffIndex.set(((index % count) + count) % count);
   }
 
   nextDifference(): void {
-    const values = this.differences();
-    if (!values.length) return;
-    const current = values.findIndex((index) => index >= this.currentDiffIndex());
-    this.currentDiffIndex.set(values[(current + 1) % values.length]);
+    const count = this.diffSegments().length;
+    if (!count) return;
+    this.currentDiffIndex.set((this.currentDiffIndex() + 1) % count);
   }
 
   previousDifference(): void {
-    const values = this.differences();
-    if (!values.length) return;
-    const reverse = [...values].reverse();
-    const current = reverse.findIndex((index) => index <= this.currentDiffIndex());
-    this.currentDiffIndex.set(reverse[(current + 1) % reverse.length]);
+    const count = this.diffSegments().length;
+    if (!count) return;
+    this.currentDiffIndex.set((this.currentDiffIndex() - 1 + count) % count);
   }
 
   undo(): void {
@@ -375,6 +732,7 @@ export class PoetryStoreService {
     this.workspace.set(previous);
     this.undoCount.set(this.undoStack.length);
     this.redoCount.set(this.redoStack.length);
+    this.clampSelection();
     this.persist();
   }
 
@@ -385,17 +743,67 @@ export class PoetryStoreService {
     this.workspace.set(next);
     this.undoCount.set(this.undoStack.length);
     this.redoCount.set(this.redoStack.length);
+    this.clampSelection();
     this.persist();
   }
 
   exportProofreadCopy(): string {
+    const workspace = this.workspace();
     const active = this.activeVersion();
-    const lines = this.analysis().map((line) => {
+    const baseline = this.baselineVersion();
+    const meterLines = this.analysis().map((line) => {
       const tags = line.cells.map((cell) => `${cell.char}${cell.actual === '?' ? '□' : `(${cell.actual})`}`).join(' ');
       return `第 ${line.index + 1} 句：${tags}`;
     });
-    const notes = this.issues().map((issue) => `[${issue.level.toUpperCase()}] ${issue.title}：${issue.detail}`);
-    return [`# ${this.workspace().title} · 格律校对稿`, '', `底本：${active.name}`, `出处：${active.source}`, '', '## 字音标注', ...lines, '', '## 检查记录', ...notes].join('\n');
+    const segments = this.diffSegments();
+    const replaceCount = segments.filter((segment) => segment.kind === 'replace' || segment.kind === 'mixed').length;
+    const insertCount = segments.filter((segment) => segment.kind === 'insert').length;
+    const deleteCount = segments.filter((segment) => segment.kind === 'delete').length;
+    const segmentLines: string[] = [];
+    if (segments.length) {
+      segments.forEach((segment, index) => {
+        segmentLines.push(`### 第 ${index + 1} 段 · ${segmentKindLabel(segment.kind)}`);
+        segmentLines.push(`- 底本：${formatContext(segment.contextBefore)}【${segment.left || '∅'}】${formatContext(segment.contextAfter)}`);
+        segmentLines.push(`- 当前：${formatContext(segment.contextBefore)}【${segment.right || '∅'}】${formatContext(segment.contextAfter)}`);
+        if (segment.notes.length) {
+          segmentLines.push('- 批注：');
+          segment.notes.forEach((note) => {
+            segmentLines.push(`  - ${note.side === 'left' ? '底本' : '当前'}《${note.versionName}》「${note.char}」：${note.text}`);
+          });
+        } else {
+          segmentLines.push('- 批注：（本段两边均无逐字批注与依据）');
+        }
+        segmentLines.push('');
+      });
+    } else {
+      segmentLines.push('（未选择比较底本，或底本与当前稿文字完全一致）');
+      segmentLines.push('');
+    }
+    const pairLines = active.antithesisPairs.length
+      ? active.antithesisPairs.map((pair) => `- 第 ${pair.leftLine + 1} 句 ↔ 第 ${pair.rightLine + 1} 句：${pair.note}`)
+      : ['（当前版本尚未标记对仗关系）'];
+    const issueLines = this.issues().map((issue) => `[${issue.level.toUpperCase()}] ${issue.title}：${issue.detail}`);
+    return [
+      `# ${workspace.title} · 格律校对稿`,
+      '',
+      `作者：${workspace.author || '未详'}`,
+      `底本：${baseline ? `${baseline.name}（${baseline.source || '出处未详'}）` : '未指定'}`,
+      `当前校勘稿：${active.name}（${active.source || '出处未详'}）`,
+      `导出时间：${new Date().toLocaleString('zh-CN')}`,
+      '',
+      '## 一、逐句字音标注',
+      ...meterLines,
+      '',
+      '## 二、异文段校勘',
+      `共 ${segments.length} 段（换字 ${replaceCount}，增字 ${insertCount}，缺字 ${deleteCount}）`,
+      '',
+      ...segmentLines,
+      '## 三、对仗关系',
+      ...pairLines,
+      '',
+      '## 四、检查记录',
+      ...issueLines,
+    ].join('\n');
   }
 
   downloadProofreadCopy(): void {
@@ -408,6 +816,14 @@ export class PoetryStoreService {
 
   selectedCell(): AnalysisCell | undefined {
     return this.analysis()[this.selectedLine()]?.cells[this.selectedPosition()];
+  }
+
+  private clampSelection(): void {
+    const lineCount = this.lines().length;
+    if (this.selectedLine() >= lineCount) this.selectedLine.set(Math.max(0, lineCount - 1));
+    const line = this.analysis()[this.selectedLine()];
+    const max = Math.max(0, (line?.cells.length ?? 1) - 1);
+    if (this.selectedPosition() > max) this.selectedPosition.set(max);
   }
 
   private commit(mutator: (workspace: PoemWorkspace) => void): void {
