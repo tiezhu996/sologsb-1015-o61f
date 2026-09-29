@@ -193,44 +193,132 @@ kbd { display: inline-grid; min-width: 21px; height: 21px; padding: 0 5px; place
 .pair-head { display: flex; align-items: center; justify-content: space-between; }
 .pair-card p { margin: 8px 0; font: 15px/1.8 "Songti SC", serif; }
 
+.migration-alert { margin: 12px 2px 0; }
+
 .compare-panel { padding: 16px; }
+.compare-empty { display: block; padding: 60px 0; }
 .compare-toolbar { display: flex; align-items: center; gap: 9px; }
 .compare-toolbar > div:first-child { margin-right: auto; }
 .version-select { width: 230px; }
-.compare-headings { display: grid; grid-template-columns: 1fr 1fr; margin-top: 17px; border: 1px solid #ded9cf; border-radius: 10px 10px 0 0; overflow: hidden; }
+.compare-headings { display: grid; grid-template-columns: 56px 1fr 1fr; margin-top: 17px; border: 1px solid #ded9cf; border-radius: 10px 10px 0 0; overflow: hidden; }
 .compare-headings > div { padding: 12px 14px; background: #f3f1ea; }
 .compare-headings > div + div { border-left: 1px solid #ded9cf; }
 .compare-headings span, .compare-headings strong, .compare-headings small { display: block; }
 .compare-headings span, .compare-headings small { color: #8b867b; font-size: 9px; }
 .compare-headings strong { margin: 3px 0; font-size: 13px; }
-.compare-text {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  min-height: 190px;
-  align-content: flex-start;
-  padding: 18px;
+
+.alignment-table {
   border: 1px solid #ded9cf;
   border-top: 0;
   border-radius: 0 0 10px 10px;
   background: #fffefa;
-}
-.diff-char {
-  width: 46px;
-  display: grid;
-  grid-template-columns: 1fr;
-  text-align: center;
-  border-radius: 6px;
-  background: #f4f2ec;
   overflow: hidden;
 }
-.diff-char i, .diff-char b { padding: 3px 2px; font: 17px/1.5 "Songti SC", serif; font-style: normal; }
-.diff-char i { color: #756f64; border-bottom: 1px solid #e2ddd3; }
-.diff-char b { color: #263e35; }
-.diff-char.is-changed { background: #fff0ed; box-shadow: inset 0 0 0 1px #ddb2ac; }
-.diff-char.is-current { box-shadow: 0 0 0 2px #a23e36, 0 3px 10px rgba(126,48,42,.2); }
-.diff-char.has-left i { color: #b5afa5; }
-.diff-char.has-right b { color: #aaa49a; }
+.align-row {
+  display: grid;
+  grid-template-columns: 56px 1fr 1fr;
+  align-items: stretch;
+  border-bottom: 1px solid #ece8df;
+}
+.align-row:last-child { border-bottom: 0; }
+.align-row.is-changed { background: #fffaf6; }
+.row-index {
+  display: grid;
+  place-items: center;
+  color: #9a9488;
+  background: #f6f3ec;
+  font: 12px/1 "Songti SC", serif;
+}
+.align-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 3px;
+  padding: 12px 14px;
+  min-height: 52px;
+}
+.align-side + .align-side { border-left: 1px solid #eee9e0; }
+.align-char {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  font: 20px/1 "Songti SC", "STSong", serif;
+}
+.align-char.op-equal { color: #6f6a60; background: transparent; }
+.align-char.op-replace { color: #8a362f; background: #fbe7dd; box-shadow: inset 0 0 0 1px #e3b29c; }
+.align-char.op-insert { color: #2f6656; background: #e3f1e6; box-shadow: inset 0 0 0 1px #a7cdb3; }
+.align-char.op-delete { color: #8a6d2f; background: #f7ecd2; box-shadow: inset 0 0 0 1px #dcc489; }
+.align-char.is-current { box-shadow: 0 0 0 2px #a23e36, 0 3px 10px rgba(126,48,42,.25); }
+.whole-line-tag {
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: #2f6656;
+  background: #e3f1e6;
+  font-size: 11px;
+}
+.whole-line-tag.missing { color: #8a6d2f; background: #f7ecd2; }
+
+.segment-jumpbar { margin-top: 16px; padding: 12px 14px; border: 1px solid #e4dfd4; border-radius: 10px; background: #fbfaf6; }
+.segment-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.segment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid #ddd7ca;
+  border-radius: 999px;
+  color: #6b665c;
+  background: #fff;
+  cursor: pointer;
+  font-size: 11px;
+}
+.segment-chip em {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #9c958a;
+  font-style: normal;
+  font-size: 10px;
+}
+.segment-chip b { font-weight: 600; }
+.segment-chip i { color: #9c958a; font-style: normal; }
+.segment-chip[kind="换字"] em { background: #b05a36; }
+.segment-chip[kind="增字"] em, .segment-chip[kind="整句增"] em { background: #3f7c5c; }
+.segment-chip[kind="缺字"] em, .segment-chip[kind="整句缺"] em { background: #a3812f; }
+.segment-chip[kind="增缺"] em { background: #8a5a8a; }
+.segment-chip.is-active { border-color: #a23e36; box-shadow: 0 0 0 2px rgba(162,62,54,.18); color: #4a302d; }
+
+.segment-detail {
+  margin-top: 14px;
+  border: 1px solid #e2d3cf;
+  border-radius: 11px;
+  background: #fff9f8;
+  scroll-margin-top: 90px;
+}
+.segment-detail header { padding: 13px 16px; border-bottom: 1px solid #f0e2de; }
+.segment-detail h3 { margin: 3px 0 0; font: 650 15px/1.3 "Songti SC", "STSong", serif; color: #7a352f; }
+.segment-sides { display: grid; grid-template-columns: 1fr 1fr; }
+.segment-side { padding: 14px 16px; }
+.segment-side + .segment-side { border-left: 1px solid #f0e2de; }
+.segment-side label { color: #9b8f86; font-size: 10px; font-weight: 700; }
+.variant-chars {
+  margin: 7px 0 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  color: #7a352f;
+  background: #fdeee9;
+  font: 24px/1.5 "Songti SC", "STSong", serif;
+  letter-spacing: .15em;
+  word-break: break-all;
+}
+.variant-chars.is-empty { color: #a8a196; background: #f4f2ec; font-size: 14px; letter-spacing: 0; }
+.annotation-list { margin: 0; padding-left: 18px; color: #6d675d; font-size: 11px; line-height: 1.9; }
+.annotation-list .muted { color: #a8a196; list-style: none; margin-left: -18px; }
 .compare-note { margin-top: 14px; }
 
 .version-layout { display: grid; grid-template-columns: 1fr 330px; gap: 12px; align-items: start; }
@@ -278,4 +366,9 @@ kbd { display: inline-grid; min-width: 21px; height: 21px; padding: 0 5px; place
   .audit-layout, .version-layout { grid-template-columns: 1fr; }
   .version-grid { grid-template-columns: repeat(2, 1fr); }
   .compare-toolbar { flex-wrap: wrap; }
+  .compare-headings, .align-row { grid-template-columns: 40px 1fr; }
+  .compare-headings > div:last-child { grid-column: 2; border-left: 1px solid #ded9cf; }
+  .align-side:last-child { grid-column: 2; border-left: 0; border-top: 1px solid #eee9e0; }
+  .segment-sides { grid-template-columns: 1fr; }
+  .segment-side + .segment-side { border-left: 0; border-top: 1px solid #f0e2de; }
 }

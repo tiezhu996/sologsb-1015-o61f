@@ -26,6 +26,18 @@
     </div>
   </header>
 
+  @if (store.migratedFromLegacy()) {
+    <nz-alert
+      class="migration-alert"
+      nzType="success"
+      nzShowIcon
+      nzCloseable
+      nzMessage="已升级旧版浏览器记录"
+      nzDescription="旧版刻本文本、逐字平仄韵组、判断依据、批注与对仗关系均已自动迁移到新的校勘结构，可直接继续编辑、比较与导出。"
+      (nzOnClose)="acknowledgeMigration()"
+    ></nz-alert>
+  }
+
   <section class="workspace-banner">
     <div class="poem-meta">
       <label>篇名</label>
@@ -41,7 +53,7 @@
     <div class="issue-pills">
       <nz-tag nzColor="error">{{ totalErrors }} 处出律</nz-tag>
       <nz-tag nzColor="warning">{{ totalWarnings }} 处待核</nz-tag>
-      <nz-tag>{{ store.differences().length }} 处异文</nz-tag>
+      <nz-tag>{{ store.segments().length }} 段异文</nz-tag>
     </div>
   </section>
 
@@ -244,40 +256,129 @@
             class="version-select"
             nzPlaceHolder="选择比较底本"
             [ngModel]="store.baselineVersionId()"
-            (ngModelChange)="store.baselineVersionId.set($event)"
+            (ngModelChange)="store.selectBaseline($event)"
           >
             @for (version of store.workspace().versions; track version.id) {
               <nz-option [nzValue]="version.id" [nzLabel]="version.name"></nz-option>
             }
           </nz-select>
-          <button nz-button (click)="store.previousDifference()">上一处异文</button>
-          <button nz-button nzType="primary" (click)="store.nextDifference()">下一处异文</button>
-          <nz-tag nzColor="error">{{ store.differences().length }} 处差异</nz-tag>
+          <button nz-button (click)="store.previousSegment()">上一段</button>
+          <button nz-button nzType="primary" (click)="store.nextSegment()">下一段</button>
+          <nz-tag nzColor="error">{{ store.segments().length }} 段异文</nz-tag>
         </div>
         @if (store.baselineVersion(); as baseline) {
-          <div class="compare-headings">
-            <div><span>底本</span><strong>{{ baseline.name }}</strong><small>{{ baseline.source }}</small></div>
-            <div><span>当前校勘稿</span><strong>{{ store.activeVersion().name }}</strong><small>{{ store.activeVersion().source }}</small></div>
-          </div>
-          <div class="compare-text">
-            @for (item of store.diff(); track item.index) {
-              <span
-                class="diff-char"
-                [class.is-changed]="item.changed"
-                [class.is-current]="item.index === store.currentDiffIndex()"
-                [class.has-left]="!item.left"
-                [class.has-right]="!item.right"
-              >
-                <i>{{ item.left || '□' }}</i>
-                <b>{{ item.right || '□' }}</b>
-              </span>
+          @if (store.alignment().rows.length === 0) {
+            <nz-empty class="compare-empty" nzNotFoundContent="底本与当前稿相同，请在版本页选择另一刻本作为底本"></nz-empty>
+          } @else {
+            <div class="compare-headings">
+              <div><span>底本</span><strong>{{ baseline.name }}</strong><small>{{ baseline.source }}</small></div>
+              <div><span>当前校勘稿</span><strong>{{ store.activeVersion().name }}</strong><small>{{ store.activeVersion().source }}</small></div>
+            </div>
+
+            <div class="alignment-table">
+              @for (row of store.alignment().rows; track row.index) {
+                <div class="align-row" [class.is-changed]="row.changed">
+                  <span class="row-index">{{ (row.leftLine ?? row.rightLine)! + 1 }}</span>
+                  <div class="align-side">
+                    @if (row.leftLine === undefined) {
+                      <span class="whole-line-tag">当前稿增句</span>
+                    } @else {
+                      @for (unit of row.units; track unit.seq) {
+                        <span
+                          class="align-char"
+                          [class.op-equal]="unit.op === 'equal'"
+                          [class.op-replace]="unit.op === 'replace'"
+                          [class.op-insert]="unit.op === 'insert'"
+                          [class.op-delete]="unit.op === 'delete'"
+                          [class.is-current]="unit.op !== 'equal' && store.currentSegment() && segmentBelongsTo(unit, store.currentSegment()!)"
+                          >{{ unit.left || '□' }}</span
+                        >
+                      }
+                    }
+                  </div>
+                  <div class="align-side">
+                    @if (row.rightLine === undefined) {
+                      <span class="whole-line-tag missing">底本有而稿无（缺句）</span>
+                    } @else {
+                      @for (unit of row.units; track unit.seq) {
+                        <span
+                          class="align-char"
+                          [class.op-equal]="unit.op === 'equal'"
+                          [class.op-replace]="unit.op === 'replace'"
+                          [class.op-insert]="unit.op === 'insert'"
+                          [class.op-delete]="unit.op === 'delete'"
+                          [class.is-current]="unit.op !== 'equal' && store.currentSegment() && segmentBelongsTo(unit, store.currentSegment()!)"
+                          >{{ unit.right || '□' }}</span
+                        >
+                      }
+                    }
+                  </div>
+                </div>
+              }
+            </div>
+
+            <div class="segment-jumpbar">
+              <span class="overline">异文段（{{ store.segments().length }}）</span>
+              <div class="segment-chips">
+                @for (segment of store.segments(); track trackSegment($index, segment); let i = $index) {
+                  <button
+                    class="segment-chip"
+                    [class.is-active]="store.currentSegment().id === segment.id"
+                    [attr.kind]="segment.kind"
+                    (click)="store.jumpSegment(i)"
+                  >
+                    <em>{{ i + 1 }}</em>
+                    <b>{{ segment.kind }}</b>
+                    <i>{{ segmentPlace(segment) }}</i>
+                  </button>
+                }
+              </div>
+            </div>
+
+            @if (store.currentSegment(); as segment) {
+              <article class="segment-detail" [id]="segment.id">
+                <header>
+                  <span class="overline">VARIANT {{ store.currentSegmentIndex() + 1 }} / {{ store.segments().length }}</span>
+                  <h3>{{ segmentPlace(segment) }} · {{ segment.kind }}</h3>
+                </header>
+                <div class="segment-sides">
+                  <div class="segment-side">
+                    <label>底本用字</label>
+                    <p class="variant-chars" [class.is-empty]="!segment.leftText">{{ segment.leftText || '（无）' }}</p>
+                    <ul class="annotation-list">
+                      @for (note of segmentAnnotations(segment).left; track note) {
+                        <li>{{ note }}</li>
+                      } @empty {
+                        <li class="muted">底本侧无逐字批注</li>
+                      }
+                    </ul>
+                  </div>
+                  <div class="segment-side">
+                    <label>校勘稿用字</label>
+                    <p class="variant-chars" [class.is-empty]="!segment.rightText">{{ segment.rightText || '（无）' }}</p>
+                    <ul class="annotation-list">
+                      @for (note of segmentAnnotations(segment).right; track note) {
+                        <li>{{ note }}</li>
+                      } @empty {
+                        <li class="muted">校勘稿侧无逐字批注</li>
+                      }
+                    </ul>
+                  </div>
+                </div>
+              </article>
             }
-          </div>
-          <div class="compare-note">
-            <nz-alert nzType="info" nzShowIcon nzMessage="比较采用字符位置对齐" nzDescription="上方为上／底本字符，下方为当前版本。点击“下一处异文”可逐项定位。"></nz-alert>
-          </div>
+
+            <div class="compare-note">
+              <nz-alert
+                nzType="info"
+                nzShowIcon
+                nzMessage="按字符对齐（最长公共序列）"
+                nzDescription="增字、缺字、换字分别标记：增字底本作 □，缺字当前稿作 □；连续变化已合并为异文段，可用“上一段／下一段”或段号逐段跳转。"
+              ></nz-alert>
+            </div>
+          }
         } @else {
-          <nz-empty nzNotFoundContent="请选择一份异文底本"></nz-empty>
+          <nz-empty class="compare-empty" nzNotFoundContent="请选择一份异文底本"></nz-empty>
         }
       </section>
     </nz-tab>

@@ -14,6 +14,7 @@ import { NzTabsModule } from 'ng-zorro-antd/tabs';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 import { METER_TEMPLATES, PoetryStoreService } from './services/poetry-store.service';
+import type { DiffSegment } from './models/poem.models';
 
 @Component({
   selector: 'app-root',
@@ -70,6 +71,29 @@ export class AppComponent {
 
   trackTemplate(index: number, item: (typeof METER_TEMPLATES)[number]): string {
     return item.id;
+  }
+
+  trackSegment(index: number, item: DiffSegment): string {
+    return item.id;
+  }
+
+  segmentAnnotations(segment: DiffSegment): { left: string[]; right: string[] } {
+    return this.store.segmentAnnotations(segment);
+  }
+
+  segmentPlace(segment: DiffSegment): string {
+    if (segment.leftLine !== undefined) return `第 ${segment.leftLine + 1} 句`;
+    return `对应当前稿第 ${(segment.rightLine ?? 0) + 1} 句`;
+  }
+
+  segmentBelongsTo(unit: { seq: number; leftLine?: number; rightLine?: number }, segment: DiffSegment): boolean {
+    if (unit.leftLine !== segment.leftLine || unit.rightLine !== segment.rightLine) return false;
+    const seqs = segment.units.map((item) => item.seq);
+    return unit.seq >= Math.min(...seqs) && unit.seq <= Math.max(...seqs);
+  }
+
+  acknowledgeMigration(): void {
+    this.store.persistMigrated();
   }
 
   @HostListener('document:keydown', ['$event'])
